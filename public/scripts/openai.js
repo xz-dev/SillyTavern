@@ -605,7 +605,8 @@ function setOpenAIMessages(chat) {
             });
         }
 
-        messages[i] = { 'role': role, 'content': content, name: name, 'media': media, 'mediaDisplay': mediaDisplay, 'mediaIndex': mediaIndex, 'invocations': invocations, 'signature': signature, 'reasoning': reasoning };
+        const contentParts = chat[j]?.extra?.content_parts;
+        messages[i] = { 'role': role, 'content': content, name: name, 'media': media, 'mediaDisplay': mediaDisplay, 'mediaIndex': mediaIndex, 'invocations': invocations, 'contentParts': contentParts, 'signature': signature, 'reasoning': reasoning };
         j++;
     }
 
@@ -957,6 +958,62 @@ async function populateChatHistory(messages, prompts, chatCompletion, type = nul
             }
         }
 
+        // New: expand content_parts (messages with merged tool call chains) into API message sequence
+        if (canUseTools && Array.isArray(chatPrompt.contentParts) && chatPrompt.contentParts.length > 0) {
+            const expandedMessages = [];
+            let currentText = '';
+            /** @type {import('./tool-calling.js').ToolInvocation[]} */
+            let currentToolCalls = [];
+
+            for (const part of chatPrompt.contentParts) {
+                if (part.type === 'text') {
+                    // Text boundary: flush any pending tool calls first
+                    if (currentToolCalls.length > 0) {
+                        const assistantMsg = await Message.createAsync('assistant', currentText || undefined, `cp-asst-${expandedMessages.length}`);
+                        await assistantMsg.setToolCalls(currentToolCalls, includeSignature, includeToolReasoning);
+                        expandedMessages.push(assistantMsg);
+                        for (const tc of currentToolCalls) {
+                            expandedMessages.push(await Message.createAsync('tool', tc.result || '[No content]', tc.id));
+                        }
+                        currentText = '';
+                        currentToolCalls = [];
+                    }
+                    if (part.text) {
+                        currentText = currentText ? currentText + '\n\n' + part.text : part.text;
+                    }
+                } else if (part.type === 'tool_call') {
+                    currentToolCalls.push(part.tool_call);
+                }
+                // 'reasoning' parts are handled by the reasoning system, skip here
+            }
+
+            // Flush remaining
+            if (currentToolCalls.length > 0) {
+                const assistantMsg = await Message.createAsync('assistant', currentText || undefined, `cp-asst-${expandedMessages.length}`);
+                await assistantMsg.setToolCalls(currentToolCalls, includeSignature, includeToolReasoning);
+                expandedMessages.push(assistantMsg);
+                for (const tc of currentToolCalls) {
+                    expandedMessages.push(await Message.createAsync('tool', tc.result || '[No content]', tc.id));
+                }
+            } else if (currentText) {
+                const assistantMsg = await Message.createAsync('assistant', currentText, `cp-asst-${expandedMessages.length}`);
+                if (chatPrompt.signature) assistantMsg.signature = chatPrompt.signature;
+                expandedMessages.push(assistantMsg);
+            }
+
+            if (expandedMessages.length > 0 && chatCompletion.canAffordAll(expandedMessages)) {
+                // Insert in reverse to maintain correct order with insertAtStart
+                for (let k = expandedMessages.length - 1; k >= 0; k--) {
+                    chatCompletion.insertAtStart(expandedMessages[k], 'chatHistory');
+                }
+            } else if (expandedMessages.length > 0) {
+                break;
+            }
+
+            continue;
+        }
+
+        // Legacy: expand invocations from old-format system messages (backward compatibility)
         if (canUseTools && Array.isArray(chatPrompt.invocations)) {
             const promptIdx = messages.indexOf(chatPrompt);
             const reasoningIsEligible = toolReasoningMode !== tool_reasoning_modes.DISABLED

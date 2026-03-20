@@ -591,6 +591,21 @@ export class ReasoningHandler {
         }
         if (this.messageReasoningDetailsDom === null) {
             this.messageReasoningDetailsDom = this.messageDom.querySelector('.mes_reasoning_details');
+            // In the block-list architecture, create the reasoning block if it doesn't exist yet (e.g. during streaming)
+            if (!this.messageReasoningDetailsDom) {
+                const contentBlocks = this.messageDom.querySelector('.mes_content_blocks');
+                if (contentBlocks) {
+                    const details = /** @type {HTMLDetailsElement} */ ($('#message_reasoning_template .mes_reasoning_details').clone()[0]);
+                    // Insert before the text block so reasoning appears first
+                    const textBlock = contentBlocks.querySelector('.mes_text[data-block-type="text"]');
+                    if (textBlock) {
+                        contentBlocks.insertBefore(details, textBlock);
+                    } else {
+                        contentBlocks.prepend(details);
+                    }
+                    this.messageReasoningDetailsDom = details;
+                }
+            }
         }
         if (this.messageReasoningContentDom === null) {
             this.messageReasoningContentDom = this.messageDom.querySelector('.mes_reasoning');

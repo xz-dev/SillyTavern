@@ -7377,27 +7377,7 @@
                             <div class="mes_edit_cancel menu_button  fa-solid fa-xmark" title="Cancel" data-i18n="[title]Cancel"></div>
                         </div>
                     </div>
-                    <details class="mes_reasoning_details">
-                        <summary class="mes_reasoning_summary flex-container">
-                            <div class="mes_reasoning_header_block flex-container">
-                                <div class="mes_reasoning_header flex-container">
-                                    <span class="mes_reasoning_header_title" data-i18n="Thought for some time">Thought for some time</span>
-                                    <div class="mes_reasoning_arrow fa-solid fa-chevron-up"></div>
-                                </div>
-                            </div>
-                            <div class="mes_reasoning_actions flex-container">
-                                <div class="mes_reasoning_edit_done menu_button edit_button fa-solid fa-check" title="Confirm" data-i18n="[title]Confirm Edit"></div>
-                                <div class="mes_reasoning_delete menu_button edit_button fa-solid fa-trash-can" title="Remove reasoning" data-i18n="[title]Remove reasoning"></div>
-                                <div class="mes_reasoning_edit_cancel menu_button edit_button fa-solid fa-xmark" title="Cancel edit" data-i18n="[title]Cancel edit"></div>
-                                <div class="mes_reasoning_close_all mes_button fa-solid fa-minimize" title="Collapse all reasoning blocks" data-i18n="[title]Collapse all reasoning blocks"></div>
-                                <div class="mes_reasoning_copy mes_button fa-solid fa-copy" title="Copy reasoning" data-i18n="[title]Copy reasoning"></div>
-                                <div class="mes_reasoning_edit mes_button fa-solid fa-pencil" title="Edit reasoning" data-i18n="[title]Edit reasoning"></div>
-                            </div>
-                        </summary>
-                        <div class="mes_reasoning"></div>
-                    </details>
-                    <div class="mes_text"></div>
-                    <div class="mes_media_wrapper"></div>
+                    <div class="mes_content_blocks"></div>
                     <div class="mes_file_wrapper"></div>
                     <div class="mes_bias"></div>
                 </div>
@@ -7645,6 +7625,54 @@
                 <div title="Swipe left" class="right_menu_button fa-lg fa-solid fa-chevron-left mes_img_swipe_left" data-i18n="[title]Swipe left"></div>
                 <div class="mes_img_swipe_counter">1/1</div>
                 <div title="Swipe right" class="right_menu_button fa-lg fa-solid fa-chevron-right mes_img_swipe_right" data-i18n="[title]Swipe right"></div>
+            </div>
+        </div>
+
+        <div id="message_text_template" class="template_element">
+            <div class="mes_text" data-block-type="text"></div>
+        </div>
+
+        <div id="message_reasoning_template" class="template_element">
+            <details class="mes_reasoning_details" data-block-type="reasoning">
+                <summary class="mes_reasoning_summary flex-container">
+                    <div class="mes_reasoning_header_block flex-container">
+                        <div class="mes_reasoning_header flex-container">
+                            <span class="mes_reasoning_header_title"></span>
+                            <div class="mes_reasoning_arrow fa-solid fa-chevron-up"></div>
+                        </div>
+                    </div>
+                    <div class="mes_reasoning_actions flex-container">
+                        <div class="mes_reasoning_edit_done menu_button edit_button fa-solid fa-check" title="Confirm" data-i18n="[title]Confirm Edit"></div>
+                        <div class="mes_reasoning_delete menu_button edit_button fa-solid fa-trash-can" title="Remove reasoning" data-i18n="[title]Remove reasoning"></div>
+                        <div class="mes_reasoning_edit_cancel menu_button edit_button fa-solid fa-xmark" title="Cancel edit" data-i18n="[title]Cancel edit"></div>
+                        <div class="mes_reasoning_close_all mes_button fa-solid fa-minimize" title="Collapse all reasoning blocks" data-i18n="[title]Collapse all reasoning blocks"></div>
+                        <div class="mes_reasoning_copy mes_button fa-solid fa-copy" title="Copy reasoning" data-i18n="[title]Copy reasoning"></div>
+                        <div class="mes_reasoning_edit mes_button fa-solid fa-pencil" title="Edit reasoning" data-i18n="[title]Edit reasoning"></div>
+                    </div>
+                </summary>
+                <div class="mes_reasoning"></div>
+            </details>
+        </div>
+
+        <div id="inline_tool_call_template" class="template_element">
+            <div class="inline_tool_call" data-tool-id="">
+                <details class="inline_tool_call_details">
+                    <summary class="inline_tool_call_header">
+                        <span class="inline_tool_call_icon"></span>
+                        <span class="inline_tool_call_name"></span>
+                        <span class="inline_tool_call_status"></span>
+                    </summary>
+                    <div class="inline_tool_call_body">
+                        <details class="inline_tool_call_section inline_tool_call_args">
+                            <summary class="inline_tool_call_label" data-i18n="Arguments">Arguments</summary>
+                            <pre class="inline_tool_call_pre"></pre>
+                        </details>
+                        <details class="inline_tool_call_section inline_tool_call_result" style="display: none;">
+                            <summary class="inline_tool_call_label"></summary>
+                            <pre class="inline_tool_call_pre"></pre>
+                        </details>
+                    </div>
+                </details>
             </div>
         </div>
 

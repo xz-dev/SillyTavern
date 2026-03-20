@@ -1,6 +1,7 @@
 import { DOMPurify } from '../lib.js';
 
-import { addOneMessage, chat, event_types, eventSource, getGeneratingApi, getGeneratingModel, main_api, saveChatConditional, system_avatar, systemUserName } from '../script.js';
+import { addOneMessage, chat, chatElement, event_types, eventSource, getGeneratingApi, getGeneratingModel, main_api, saveChatConditional, system_avatar, systemUserName, updateMessageBlock } from '../script.js';
+import { deleteItemizedPromptForMessage } from './itemized-prompts.js';
 import { chat_completion_sources, custom_prompt_post_processing_types, getChatCompletionModel, model_list, oai_settings } from './openai.js';
 import { Popup } from './popup.js';
 import { SlashCommand } from './slash-commands/SlashCommand.js';
@@ -21,11 +22,21 @@ import { isTrueBoolean } from './utils.js';
  * @property {string} result - The result of the tool invocation.
  * @property {string?} signature - The thought signature associated with the tool invocation.
  * @property {string?} reasoning - The plaintext reasoning associated with this tool call turn.
+ * @property {boolean} [error] - Whether the tool invocation failed.
+ * @property {MediaAttachment[]} [media] - Media attachments produced by the tool (e.g. generated images).
+ */
+
+/**
+ * Structured return type for tool action functions that produce media or need special display.
+ * Tool actions can return either a plain string or a ToolActionResult object.
+ * @typedef {object} ToolActionResult
+ * @property {string} result - The text result of the tool invocation (sent to LLM).
+ * @property {MediaAttachment[]} [media] - Media attachments to embed in the tool card.
  */
 
 /**
  * @typedef {object} ToolInvocationResult
- * @property {ToolInvocation[]} invocations Successful tool invocations
+ * @property {ToolInvocation[]} invocations Tool invocations (both successful and failed)
  * @property {Error[]} errors Errors that occurred during tool invocation
  * @property {string[]} stealthCalls Names of stealth tools that were invoked
  */
@@ -319,7 +330,7 @@ export class ToolManager {
      * Invokes a tool by name. Returns the result of the tool's action function.
      * @param {string} name The name of the tool to invoke.
      * @param {object} parameters Function parameters. For example, if the tool requires a "name" parameter, you would pass {name: "value"}.
-     * @returns {Promise<string|Error>} The result of the tool's action function. If an error occurs, null is returned. Non-string results are JSON-stringified.
+     * @returns {Promise<string|ToolActionResult|Error>} The result of the tool's action function. If an error occurs, an Error is returned. Non-string results are JSON-stringified unless they are a ToolActionResult.
      */
     static async invokeFunctionTool(name, parameters) {
         try {
@@ -330,16 +341,23 @@ export class ToolManager {
             const invokeParameters = this.#parseParameters(parameters);
             const tool = this.#tools.get(name);
             const result = await tool.invoke(invokeParameters);
+
+            // Structured ToolActionResult objects (with media) are returned as-is
+            // so that invokeFunctionTools can extract media attachments for tool card rendering.
+            if (typeof result === 'object' && result !== null && 'result' in result) {
+                return result;
+            }
+
             return typeof result === 'string' ? result : JSON.stringify(result);
         } catch (error) {
             console.error(`[ToolManager] An error occurred while invoking the tool "${name}":`, error);
 
             if (error instanceof Error) {
                 error.cause = name;
-                return error.toString();
+                return error;
             }
 
-            return new Error('Unknown error occurred while invoking the tool.', { cause: name }).toString();
+            return new Error('Unknown error occurred while invoking the tool.', { cause: name });
         }
     }
 
@@ -796,9 +814,21 @@ export class ToolManager {
             toastr.clear(toast);
             console.log('[ToolManager] Function tool result:', result);
 
-            // Save a successful invocation
+            // Handle tool errors — still create an invocation so the LLM sees the failure
             if (toolResult instanceof Error) {
                 result.errors.push(toolResult);
+                if (!isStealth) {
+                    result.invocations.push({
+                        id,
+                        displayName,
+                        name,
+                        parameters: stringify(parameters),
+                        result: `Error: ${toolResult.message}`,
+                        error: true,
+                        signature: null,
+                        reasoning: null,
+                    });
+                }
                 continue;
             }
 
@@ -808,14 +838,27 @@ export class ToolManager {
                 continue;
             }
 
+            // Handle structured return from tool actions (string | ToolActionResult)
+            let resultText, resultMedia;
+            const isStructured = typeof toolResult === 'object' && toolResult !== null;
+            if (isStructured) {
+                /** @type {ToolActionResult} */
+                const structured = toolResult;
+                resultText = String(structured.result ?? '');
+                resultMedia = Array.isArray(structured.media) ? structured.media : undefined;
+            } else {
+                resultText = String(toolResult);
+            }
+
             const invocation = {
                 id,
                 displayName,
                 name,
                 parameters: stringify(parameters),
-                result: toolResult,
+                result: resultText,
                 signature: toolCall.signature || null,
                 reasoning: reasoningText || null,
+                ...(resultMedia && { media: resultMedia }),
             };
             result.invocations.push(invocation);
         }
@@ -861,7 +904,9 @@ export class ToolManager {
     }
 
     /**
-     * Saves function tool invocations to the last user chat message extra metadata.
+     * Saves function tool invocations as a separate system message.
+     * @deprecated Use {@link attachToolInvocations} for new code. This method is retained for
+     * backward compatibility with legacy chat histories that store tool calls as separate messages.
      * @param {ToolInvocation[]} invocations Successful tool invocations
      */
     static async saveFunctionToolInvocations(invocations) {
@@ -886,6 +931,177 @@ export class ToolManager {
         addOneMessage(message);
         await eventSource.emit(event_types.TOOL_CALLS_RENDERED, invocations);
         await saveChatConditional();
+    }
+
+    /**
+     * Attaches tool invocation results to an existing assistant message instead of creating a separate system message.
+     * This is the new approach that keeps tool call data on the originating assistant message,
+     * enabling single-bubble rendering with content_parts.
+     * @param {number} messageId The chat array index of the assistant message to attach to
+     * @param {ToolInvocation[]} invocations Successful tool invocations
+     */
+    static async attachToolInvocations(messageId, invocations) {
+        if (!Array.isArray(invocations) || invocations.length === 0) {
+            return;
+        }
+
+        const message = chat[messageId];
+        if (!message) return;
+
+        message.extra = message.extra || {};
+        message.extra.tool_invocations = invocations;
+        message.extra.api = message.extra.api || getGeneratingApi();
+        message.extra.model = message.extra.model || getGeneratingModel();
+
+        // Build preliminary content_parts so that updateMessageBlock renders tool call cards
+        // immediately via renderContentParts. mergeToolChainMessages will rebuild this later.
+        /** @type {ContentPart[]} */
+        const parts = [];
+        if (message.extra?.reasoning) {
+            parts.push({ type: 'reasoning', text: message.extra.reasoning, duration: message.extra?.reasoning_duration });
+        }
+        if (message.mes && !['', '...'].includes(message.mes)) {
+            parts.push({ type: 'text', text: message.mes });
+        }
+        for (const inv of invocations) {
+            parts.push({ type: 'tool_call', tool_call: inv });
+        }
+        message.extra.content_parts = parts;
+
+        // Reasoning has been consumed into content_parts — remove from extra to avoid duplication.
+        // For tool-call messages, reasoning lives exclusively in content_parts (and ToolInvocation.reasoning).
+        delete message.extra.reasoning;
+        delete message.extra.reasoning_duration;
+        delete message.extra.reasoning_type;
+
+        await eventSource.emit(event_types.TOOL_CALLS_PERFORMED, invocations);
+        // Re-render to show inline tool call cards
+        updateMessageBlock(messageId, message);
+
+        // Ensure the message is visible (streaming may have hidden it via displayNone)
+        chatElement.children(`.mes[mesid="${messageId}"]`).removeClass('displayNone');
+
+        await eventSource.emit(event_types.TOOL_CALLS_RENDERED, invocations);
+        await saveChatConditional();
+    }
+
+    /**
+     * Merges messages created during a tool call chain into a single message with content_parts.
+     * Called after a recursive Generate() completes, this combines the parent message (with its text
+     * and tool invocations) and all subsequent assistant messages into one unified message.
+     *
+     * Design:
+     * - Parallel tool calls (same depth) → consecutive tool_call parts, no text boundary
+     * - Serial tool calls (different depths) → separated by text boundary (may be empty string)
+     * - Already-merged messages (with content_parts) are flattened, not nested
+     *
+     * @param {number} parentMsgId The chat array index of the first message in the tool call chain
+     * @param {number} [mergeStartIndex] The index to start merging from (default: parentMsgId + 1).
+     *   Use this to skip over side-effect messages (e.g. images pushed by tool actions) that should
+     *   not be merged. Pass `chat.length` recorded after tool execution but before recursive Generate().
+     */
+    static mergeToolChainMessages(parentMsgId, mergeStartIndex = parentMsgId + 1) {
+        const parentMsg = chat[parentMsgId];
+        if (!parentMsg) return;
+
+        // Collect indices of messages to merge (from mergeStartIndex until next user message)
+        // Messages between parentMsgId+1 and mergeStartIndex are side-effects (e.g. images) and are left alone.
+        const messagesToRemove = [];
+        for (let i = mergeStartIndex; i < chat.length; i++) {
+            const msg = chat[i];
+            if (msg.is_user) break;
+            messagesToRemove.push(i);
+        }
+
+        // Nothing to merge
+        if (messagesToRemove.length === 0) return;
+
+        // Build content_parts starting from the parent message
+        /** @type {ContentPart[]} */
+        const parts = [];
+
+        // Reuse parent's existing content_parts (built by attachToolInvocations, reasoning already consumed)
+        if (Array.isArray(parentMsg.extra?.content_parts)) {
+            parts.push(...parentMsg.extra.content_parts);
+        } else {
+            // Fallback: build from individual fields (e.g. loaded from older chat data)
+            if (parentMsg.extra?.reasoning) {
+                parts.push({ type: 'reasoning', text: parentMsg.extra.reasoning, duration: parentMsg.extra?.reasoning_duration });
+            }
+            if (parentMsg.mes && !['', '...'].includes(parentMsg.mes)) {
+                parts.push({ type: 'text', text: parentMsg.mes });
+            }
+            if (Array.isArray(parentMsg.extra?.tool_invocations)) {
+                for (const inv of parentMsg.extra.tool_invocations) {
+                    parts.push({ type: 'tool_call', tool_call: inv });
+                }
+            }
+        }
+
+        // Subsequent messages from recursive Generate() calls
+        for (const idx of messagesToRemove) {
+            const msg = chat[idx];
+
+            if (Array.isArray(msg.extra?.content_parts)) {
+                // Already merged by deeper recursion → flatten
+                parts.push(...msg.extra.content_parts);
+            } else {
+                // Raw message's reasoning (if any)
+                if (msg.extra?.reasoning) {
+                    parts.push({ type: 'reasoning', text: msg.extra.reasoning, duration: msg.extra?.reasoning_duration });
+                }
+                // Raw message → add text boundary (even if empty) to separate serial tool calls
+                const textContent = (msg.mes && !['', '...'].includes(msg.mes)) ? msg.mes : '';
+                parts.push({ type: 'text', text: textContent });
+
+                // This message's tool invocations
+                if (Array.isArray(msg.extra?.tool_invocations)) {
+                    for (const inv of msg.extra.tool_invocations) {
+                        parts.push({ type: 'tool_call', tool_call: inv });
+                    }
+                }
+            }
+        }
+
+        // Update parent message
+        parentMsg.extra = parentMsg.extra || {};
+        parentMsg.extra.content_parts = parts;
+
+        // Set mes to text-only summary for backward compatibility
+        parentMsg.mes = parts
+            .filter(p => p.type === 'text' && /** @type {TextContentPart} */(p).text)
+            .map(p => /** @type {TextContentPart} */(p).text)
+            .join('\n\n');
+
+        // Carry over metadata from the last message in the chain
+        const lastMsg = chat[messagesToRemove[messagesToRemove.length - 1]];
+        if (lastMsg?.extra?.token_count) {
+            parentMsg.extra.token_count = lastMsg.extra.token_count;
+        }
+        if (lastMsg?.gen_finished) {
+            parentMsg.gen_finished = lastMsg.gen_finished;
+        }
+
+        // Remove subsequent messages from DOM and chat array (back to front)
+        for (let i = messagesToRemove.length - 1; i >= 0; i--) {
+            const idx = messagesToRemove[i];
+            deleteItemizedPromptForMessage(idx);
+            chatElement.children(`.mes[mesid="${idx}"]`).remove();
+        }
+        chat.splice(mergeStartIndex, messagesToRemove.length);
+
+        // Re-render parent message with merged content
+        updateMessageBlock(parentMsgId, parentMsg);
+
+        // Ensure the merged message is visible (streaming may have hidden it via displayNone
+        // when the initial text was empty and tool_calls were detected)
+        const parentEl = chatElement.children(`.mes[mesid="${parentMsgId}"]`);
+        parentEl.removeClass('displayNone');
+
+        // Fix mesid attributes for any messages after the removed ones
+        chatElement.children('.mes').each(function (index) {
+            $(this).attr('mesid', index);
+        });
     }
 
     /**
@@ -961,7 +1177,12 @@ export class ToolManager {
                     throw result;
                 }
 
-                return result;
+                // ToolActionResult → extract text for slash command return
+                if (typeof result === 'object' && result !== null && 'result' in result) {
+                    return String(/** @type {ToolActionResult} */(result).result);
+                }
+
+                return /** @type {string} */(result);
             },
         }));
 

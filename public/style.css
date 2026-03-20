@@ -658,6 +658,92 @@ small {
     opacity: 0.7;
 }
 
+/* Inline tool call cards within assistant message bubbles */
+.inline_tool_call {
+    margin: 8px 0;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    overflow: hidden;
+    text-align: left;
+}
+
+
+.inline_tool_call_header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 50%, transparent);
+    font-size: 0.9em;
+    cursor: pointer;
+    user-select: none;
+}
+
+.inline_tool_call_header:hover {
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 80%, transparent);
+}
+
+.inline_tool_call_icon {
+    opacity: 0.7;
+    font-size: 0.85em;
+}
+
+.inline_tool_call_name {
+    font-weight: 600;
+}
+
+.inline_tool_call_status {
+    margin-left: auto;
+    opacity: 0.7;
+}
+
+.inline_tool_call_body {
+    padding: 8px 10px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+}
+
+.inline_tool_call_section {
+    margin-bottom: 6px;
+}
+
+.inline_tool_call_section:last-child {
+    margin-bottom: 0;
+}
+
+.inline_tool_call_label {
+    font-size: 0.8em;
+    font-weight: 600;
+    opacity: 0.7;
+    margin-bottom: 2px;
+    cursor: pointer;
+}
+
+.inline_tool_call_pre {
+    max-height: 200px;
+    overflow: auto;
+    font-size: 0.85em;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+    padding: 4px 6px;
+    background: color-mix(in srgb, var(--SmartThemeBlurTintColor) 30%, transparent);
+    border-radius: 3px;
+}
+
+/* Error tool call card */
+.inline_tool_call.inline_tool_call_error {
+    border-color: color-mix(in srgb, red 60%, var(--SmartThemeBorderColor));
+}
+
+.inline_tool_call_error .inline_tool_call_header {
+    background: color-mix(in srgb, red 15%, transparent);
+}
+
+.inline_tool_call_error .inline_tool_call_status {
+    color: red;
+    opacity: 1;
+}
+
 .mes.smallSysMes {
     padding: 5px !important;
     font-size: calc(var(--mainFontSize)* 0.9);
@@ -1487,6 +1573,33 @@ body.hideAllSwipeButtons :is(.swipe_left, .swipe_right),
     width: 100%;
     overflow-x: hidden;
     overflow-y: clip;
+}
+
+.mes_content_blocks {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+
+.mes_content_blocks:empty {
+    display: none;
+}
+
+.mes_media_block {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    padding-right: var(--mes-right-spacing);
+}
+
+.mes_media_block:empty {
+    display: none;
+}
+
+.mes_tool_call {
+    padding-right: var(--mes-right-spacing);
 }
 
 .mes_text,

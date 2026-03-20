@@ -2058,7 +2058,7 @@ export function addDOMPurifyHooks() {
  * @param {string} direction Swipe direction
  * @returns {Promise<void>}
  */
-async function onImageSwiped(messageId, element, direction) {
+async function onImageSwiped(messageId, element, direction, toolCallId = null) {
     const animationClass = 'fa-fade';
     const messageMedia = element.find('.mes_img, .mes_video');
 
@@ -2075,6 +2075,47 @@ async function onImageSwiped(messageId, element, direction) {
         return;
     }
 
+    // Per-tool-call gallery swiping
+    if (toolCallId) {
+        const groupItems = media.filter(m => m.source_id === toolCallId);
+
+        message.extra.tool_call_swipe_indices = message.extra.tool_call_swipe_indices || {};
+        const currentIdx = message.extra.tool_call_swipe_indices[toolCallId] || 0;
+
+        // Compute flat index in mes.extra.media so sdMessageButton picks the correct selectedMedia
+        const flatIndices = media.reduce((acc, m, i) => {
+            if (m.source_id === toolCallId) acc.push(i);
+            return acc;
+        }, []);
+        message.extra.media_index = flatIndices[currentIdx] ?? flatIndices[0] ?? 0;
+
+        // Emit before early return so SD extension can generate new images on overswipe
+        await eventSource.emit(event_types.IMAGE_SWIPED, { message, element, direction, toolCallId });
+
+        // Re-fetch after emit: SD extension may have added a new image to this group
+        const updatedGroupItems = media.filter(m => m.source_id === toolCallId);
+
+        if (updatedGroupItems.length <= 1) {
+            // Still single image after overswipe — nothing to switch to
+            await saveChatConditional();
+            appendMediaToMessage(message, element);
+            return;
+        }
+
+        if (direction === SWIPE_DIRECTION.LEFT) {
+            message.extra.tool_call_swipe_indices[toolCallId] = currentIdx === 0 ? updatedGroupItems.length - 1 : currentIdx - 1;
+        }
+        if (direction === SWIPE_DIRECTION.RIGHT) {
+            const newIdx = currentIdx + 1;
+            message.extra.tool_call_swipe_indices[toolCallId] = newIdx >= updatedGroupItems.length ? 0 : newIdx;
+        }
+
+        await saveChatConditional();
+        appendMediaToMessage(message, element);
+        return;
+    }
+
+    // Original non-tool-call gallery swiping
     const currentIndex = getMediaIndex(message);
     const mediaDisplay = getMediaDisplay(message);
 
@@ -2364,11 +2405,13 @@ export function initChatUtilities() {
     });
     chatElement.on('click', '.mes_img_swipe_left', async function () {
         const { messageId, messageBlock } = getMediaContainerInfo.call(this);
-        await onImageSwiped(messageId, messageBlock, SWIPE_DIRECTION.LEFT);
+        const toolCallId = $(this).closest('.mes_img_swipes').attr('data-tool-call-id') || null;
+        await onImageSwiped(messageId, messageBlock, SWIPE_DIRECTION.LEFT, toolCallId);
     });
     chatElement.on('click', '.mes_img_swipe_right', async function () {
         const { messageId, messageBlock } = getMediaContainerInfo.call(this);
-        await onImageSwiped(messageId, messageBlock, SWIPE_DIRECTION.RIGHT);
+        const toolCallId = $(this).closest('.mes_img_swipes').attr('data-tool-call-id') || null;
+        await onImageSwiped(messageId, messageBlock, SWIPE_DIRECTION.RIGHT, toolCallId);
     });
 
     $('#file_form').on('reset', function () {

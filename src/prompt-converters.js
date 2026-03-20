@@ -233,12 +233,17 @@ export function convertClaudeMessages(messages, prefillString, useSysPrompt, use
     const parse = (str) => typeof str === 'string' ? JSON.parse(str) : str;
     messages.forEach((message) => {
         if (message.role === 'assistant' && message.tool_calls) {
-            message.content = message.tool_calls.map((tc) => ({
+            const toolUseParts = message.tool_calls.map((tc) => ({
                 type: 'tool_use',
                 id: tc.id,
                 name: tc.function.name,
                 input: parse(tc.function.arguments),
             }));
+            // Preserve existing text content alongside tool_use parts
+            const textContent = typeof message.content === 'string' && message.content.trim()
+                ? [{ type: 'text', text: message.content }]
+                : [];
+            message.content = [...textContent, ...toolUseParts];
         }
 
         if (message.role === 'tool') {
@@ -390,9 +395,11 @@ export function convertCohereMessages(messages, names) {
     }
 
     messages.forEach((msg, index) => {
-        // Tool calls require an assistent primer
+        // Tool calls require an assistant primer — preserve existing content if present
         if (Array.isArray(msg.tool_calls)) {
-            if (index > 0 && messages[index - 1].role === 'assistant') {
+            if (msg.content && typeof msg.content === 'string' && msg.content.trim()) {
+                // Already has text content, keep it
+            } else if (index > 0 && messages[index - 1].role === 'assistant') {
                 msg.content = messages[index - 1].content;
                 messages.splice(index - 1, 1);
             } else {
@@ -464,21 +471,25 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
 
         // Convert the content to an array of parts
         if (!Array.isArray(message.content)) {
-            const content = (() => {
-                const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
-                const hasToolCallId = typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0;
+            const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+            const hasToolCallId = typeof message.tool_call_id === 'string' && message.tool_call_id.length > 0;
+            const parts = [];
 
-                if (hasToolCalls) {
-                    return { type: 'tool_calls', tool_calls: message.tool_calls };
-                }
+            // Preserve text content even when tool_calls are present
+            if (typeof message.content === 'string' && message.content.trim()) {
+                parts.push({ type: 'text', text: String(message.content) });
+            }
 
-                if (hasToolCallId) {
-                    return { type: 'tool_call_id', tool_call_id: message.tool_call_id, content: String(message.content ?? '') };
-                }
+            if (hasToolCalls) {
+                parts.push({ type: 'tool_calls', tool_calls: message.tool_calls });
+            } else if (hasToolCallId) {
+                parts.push({ type: 'tool_call_id', tool_call_id: message.tool_call_id, content: String(message.content ?? '') });
+            } else if (parts.length === 0) {
+                // No text and no tool calls — add empty text part
+                parts.push({ type: 'text', text: String(message.content ?? '') });
+            }
 
-                return { type: 'text', text: String(message.content ?? '') };
-            })();
-            message.content = [content];
+            message.content = parts;
         }
 
         // similar story as claude

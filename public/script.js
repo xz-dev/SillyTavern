@@ -184,6 +184,7 @@ import {
     clamp,
     shakeElement,
     createTimeout,
+    setDatasetProperty,
 } from './scripts/utils.js';
 import { debounce_timeout, GENERATION_TYPE_TRIGGERS, IGNORE_SYMBOL, inject_ids, MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE, OVERSWIPE_BEHAVIOR, SCROLL_BEHAVIOR, SWIPE_DIRECTION, SWIPE_SOURCE, SWIPE_STATE } from './scripts/constants.js';
 
@@ -230,7 +231,7 @@ import {
     formatInstructModeStoryString,
     getInstructStoppingSequences,
 } from './scripts/instruct-mode.js';
-import { initLocales, t } from './scripts/i18n.js';
+import { getCurrentLocale, initLocales, t } from './scripts/i18n.js';
 import { getFriendlyTokenizerName, getTokenCount, getTokenCountAsync, initTokenizers, saveTokenCache } from './scripts/tokenizers.js';
 import {
     user_avatar,
@@ -269,7 +270,7 @@ import { initServerHistory } from './scripts/server-history.js';
 import { initSettingsSearch } from './scripts/setting-search.js';
 import { initBulkEdit } from './scripts/bulk-edit.js';
 import { getContext } from './scripts/st-context.js';
-import { extractReasoningFromData, extractReasoningSignatureFromData, initReasoning, parseReasoningInSwipes, PromptReasoning, ReasoningHandler, removeReasoningFromString, updateReasoningUI } from './scripts/reasoning.js';
+import { extractReasoningFromData, extractReasoningSignatureFromData, initReasoning, parseReasoningInSwipes, PromptReasoning, ReasoningHandler, removeReasoningFromString } from './scripts/reasoning.js';
 import { accountStorage } from './scripts/util/AccountStorage.js';
 import { initWelcomeScreen, openPermanentAssistantChat, openPermanentAssistantCard, getPermanentAssistantAvatar } from './scripts/welcome-screen.js';
 import { initDataMaid } from './scripts/data-maid.js';
@@ -1936,14 +1937,11 @@ function insertSVGIcon(mes, extra) {
 export function updateMessageBlock(messageId, message, { rerenderMessage = true } = {}) {
     const messageElement = chatElement.find(`[mesid="${messageId}"]`);
     if (rerenderMessage) {
-        const text = message?.extra?.display_text ?? message.mes;
-        messageElement.find('.mes_text').html(messageFormatting(text, message.name, message.is_system, message.is_user, messageId, {}, false));
+        collectToolCallMedia(message);
+        const displayList = buildDisplayList(message);
+        const contentBlocks = messageElement.find('.mes_content_blocks')[0];
+        renderBlockList(contentBlocks, displayList, messageId, message, messageElement);
     }
-
-    updateReasoningUI(messageElement);
-
-    addCopyToCodeBlocks(messageElement);
-    appendMediaToMessage(message, messageElement);
 }
 
 /**
@@ -2120,8 +2118,44 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
     ensureMessageMediaIsArray(mes);
 
     const fileWrapper = messageElement.find('.mes_file_wrapper');
-    const mediaWrapper = messageElement.find('.mes_media_wrapper');
 
+    // In the block-list architecture, media is rendered as part of the block list.
+    // Re-render the block list instead of the old media wrapper approach.
+    const contentBlocks = messageElement.find('.mes_content_blocks');
+    if (contentBlocks.length > 0) {
+        // Handle files (still outside the block list)
+        const hasFiles = Array.isArray(mes?.extra?.files) && mes.extra.files.length > 0;
+        fileWrapper.empty();
+        if (hasFiles) {
+            for (let index = 0; index < mes.extra.files.length; index++) {
+                const file = mes.extra.files[index];
+                const template = $('#message_file_template .mes_file_container').clone();
+                template.attr('data-index', index);
+                template.find('.mes_file_name').text(file.name).attr('title', file.name);
+                template.find('.mes_file_size').text(humanFileSize(file.size)).attr('title', file.size);
+                fileWrapper.append(template);
+            }
+        }
+        // Capture scroll state before re-render
+        const chatHeight = chatElement.prop('scrollHeight');
+        const scrollPosition = chatElement.scrollTop();
+        // Re-render block list to update media blocks
+        const messageId = Number(messageElement.attr('mesid'));
+        collectToolCallMedia(mes);
+        const displayList = buildDisplayList(mes);
+        renderBlockList(contentBlocks[0], displayList, messageId, mes, messageElement);
+        // Adjust scroll position after re-render
+        if (scrollBehavior === SCROLL_BEHAVIOR.KEEP) {
+            chatElement.scrollTop(scrollPosition);
+        } else if (scrollBehavior === SCROLL_BEHAVIOR.ADJUST) {
+            const newChatHeight = chatElement.prop('scrollHeight');
+            chatElement.scrollTop(scrollPosition + (newChatHeight - chatHeight));
+        }
+        return;
+    }
+
+    // Legacy fallback for messages without .mes_content_blocks (should not happen)
+    const mediaWrapper = messageElement.find('.mes_media_wrapper');
     const hasMedia = Array.isArray(mes?.extra?.media) && mes.extra.media.length > 0;
     const hasFiles = Array.isArray(mes?.extra?.files) && mes.extra.files.length > 0;
     const mediaDisplay = hasMedia ? getMediaDisplay(mes) : null;
@@ -2326,25 +2360,65 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
         });
     }
 
-    // Add media gallery to message
-    if (hasMedia && mediaDisplay === MEDIA_DISPLAY.GALLERY) {
-        const mediaIndex = getMediaIndex(mes);
-        const selectedMedia = mes.extra.media[mediaIndex];
+    const toolCallMedia = hasMedia ? mes.extra.media.filter(m => m.source_id) : [];
+    const nonToolCallMedia = hasMedia ? mes.extra.media.filter(m => !m.source_id) : [];
 
-        const galleryControls = $('#message_gallery_controls .mes_img_swipes').clone();
-        const counter = galleryControls.find('.mes_img_swipe_counter');
-        counter.text(`${mediaIndex + 1}/${mes.extra.media.length}`);
+    // Render per-tool-call independent galleries
+    if (toolCallMedia.length > 0) {
+        /** @type {Map<string, {items: MediaAttachment[], indices: number[]}>} */
+        const groups = new Map();
+        for (let i = 0; i < mes.extra.media.length; i++) {
+            const m = mes.extra.media[i];
+            if (!m.source_id) continue;
+            if (!groups.has(m.source_id)) {
+                groups.set(m.source_id, { items: [], indices: [] });
+            }
+            const group = groups.get(m.source_id);
+            group.items.push(m);
+            group.indices.push(i); // index in the flat mes.extra.media array
+        }
 
-        const template = appendMediaAttachment(selectedMedia, mediaIndex);
-        template.addClass('img_swipes');
-        template.append(galleryControls);
+        const tcIndices = mes.extra?.tool_call_swipe_indices || {};
+        for (const [toolCallId, group] of groups) {
+            const currentIdx = Math.min(tcIndices[toolCallId] || 0, group.items.length - 1);
+            const selectedMedia = group.items[currentIdx];
+            const flatIndex = group.indices[currentIdx];
+
+            const galleryControls = $('#message_gallery_controls .mes_img_swipes').clone();
+            galleryControls.attr('data-tool-call-id', toolCallId);
+            const counter = galleryControls.find('.mes_img_swipe_counter');
+            counter.text(`${currentIdx + 1}/${group.items.length}`);
+
+            const template = appendMediaAttachment(selectedMedia, flatIndex);
+            template.addClass('img_swipes');
+            template.attr('data-tool-call-id', toolCallId);
+            template.append(galleryControls);
+        }
     }
 
-    // Add media as a list to message
-    if (hasMedia && mediaDisplay === MEDIA_DISPLAY.LIST) {
-        for (let index = 0; index < mes.extra.media.length; index++) {
-            const attachment = mes.extra.media[index];
-            appendMediaAttachment(attachment, index);
+    // Render non-tool-call media with the original GALLERY/LIST logic
+    if (nonToolCallMedia.length > 0) {
+        if (mediaDisplay === MEDIA_DISPLAY.GALLERY) {
+            const mediaIndex = getMediaIndex(mes);
+            // Find in the non-tool-call subset
+            const nonTcIndices = mes.extra.media.reduce((acc, m, i) => { if (!m.source_id) acc.push(i); return acc; }, []);
+            const clampedIndex = Math.min(mediaIndex, nonTcIndices.length - 1);
+            const flatIndex = nonTcIndices[clampedIndex] ?? 0;
+            const selectedMedia = mes.extra.media[flatIndex];
+
+            const galleryControls = $('#message_gallery_controls .mes_img_swipes').clone();
+            const counter = galleryControls.find('.mes_img_swipe_counter');
+            counter.text(`${clampedIndex + 1}/${nonTcIndices.length}`);
+
+            const template = appendMediaAttachment(selectedMedia, flatIndex);
+            template.addClass('img_swipes');
+            template.append(galleryControls);
+        } else {
+            for (let index = 0; index < mes.extra.media.length; index++) {
+                const attachment = mes.extra.media[index];
+                if (attachment.source_id) continue; // skip tool call media
+                appendMediaAttachment(attachment, index);
+            }
         }
     }
 
@@ -2417,19 +2491,227 @@ function updateMessageItemizedPromptButton(message, { messageId = chat.indexOf(m
 }
 
 /**
- * Gets messageFormatting for a ChatMessage object.
- * @param {ChatMessage} message
- * @param {object} options Options
- * @param {number} [options.messageId] Message ID
- * @returns {string} Formatted message HTML
+ * Collects media from tool_call content_parts into mes.extra.media so they are rendered
+ * by the standard appendMediaToMessage pipeline (with enlarge/delete controls, gallery, etc.).
+ * Does not duplicate media that is already present in mes.extra.media.
+ * @param {ChatMessage} mes The message object
  */
-function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
-    // if mes.extra.uses_system_ui is true, set an override on the sanitizer options
+function collectToolCallMedia(mes) {
+    const parts = mes.extra?.content_parts;
+    if (!Array.isArray(parts)) return;
+
+    for (const part of parts) {
+        if (part.type !== 'tool_call' || !Array.isArray(part.tool_call?.media)) continue;
+        const toolCallId = part.tool_call.id;
+        for (const media of part.tool_call.media) {
+            if (!media?.url) continue;
+            if (!mes.extra) mes.extra = {};
+            if (!Array.isArray(mes.extra.media)) mes.extra.media = [];
+            const alreadyExists = mes.extra.media.some(m => m.url === media.url);
+            if (!alreadyExists) {
+                // Tag media with tool call ID so each tool call gets its own gallery
+                if (toolCallId) {
+                    media.source_id = toolCallId;
+                }
+                mes.extra.media.push(media);
+            }
+        }
+    }
+}
+
+/**
+ * Renders an inline tool call card for display within a message bubble.
+ * @param {import('./scripts/tool-calling.js').ToolInvocation} toolCall The tool invocation data
+ * @returns {HTMLElement} The tool call card element
+ */
+function renderToolCallCard(toolCall) {
+    const template = $('#inline_tool_call_template .inline_tool_call').clone();
+    const displayName = ToolManager.getDisplayName(toolCall.name) || toolCall.name;
+    const hasResult = toolCall.result && toolCall.result !== '[No content]';
+    const isError = Boolean(toolCall.error);
+    const argsText = typeof toolCall.parameters === 'string' ? toolCall.parameters : JSON.stringify(toolCall.parameters, null, 2);
+
+    template.attr('data-tool-id', toolCall.id || '');
+    if (isError) template.addClass('inline_tool_call_error');
+
+    // Status icon: error ✗, success ✓, pending ⏳
+    const statusIcon = isError ? '\u2717' : (hasResult ? '\u2713' : '\u23F3');
+    const toolIcon = isError ? 'fa-solid fa-triangle-exclamation' : 'fa-solid fa-wrench';
+    template.find('.inline_tool_call_icon').addClass(toolIcon);
+    template.find('.inline_tool_call_name').text(displayName);
+    template.find('.inline_tool_call_status').text(statusIcon);
+
+    // Fill arguments
+    template.find('.inline_tool_call_args .inline_tool_call_pre').text(argsText);
+
+    // Fill result section if present
+    if (hasResult) {
+        const resultText = typeof toolCall.result === 'string' ? toolCall.result : JSON.stringify(toolCall.result, null, 2);
+        const resultSection = template.find('.inline_tool_call_result');
+        resultSection.show();
+        resultSection.find('.inline_tool_call_label').text(isError ? t`Error` : t`Result`);
+        resultSection.find('.inline_tool_call_pre').text(resultText);
+    }
+
+    return template[0];
+}
+
+/**
+ * @typedef {DisplayReasoningPart | DisplayTextPart | DisplayToolCallPart | DisplayMediaPart} DisplayPart
+ *
+ * @typedef {Object} DisplayReasoningPart
+ * @property {'reasoning'} type
+ * @property {string} text
+ * @property {number} [duration]
+ * @property {string} [reasoningType]
+ *
+ * @typedef {Object} DisplayTextPart
+ * @property {'text'} type
+ * @property {string} text
+ *
+ * @typedef {Object} DisplayToolCallPart
+ * @property {'tool_call'} type
+ * @property {import('./scripts/tool-calling.js').ToolInvocation} tool_call
+ *
+ * @typedef {Object} DisplayMediaPart
+ * @property {'media'} type
+ * @property {MediaAttachment[]} attachments
+ */
+
+/**
+ * Builds a display list from a chat message for the unified block-list renderer.
+ * Handles both single-step (mes + extra.reasoning) and multi-step (content_parts) messages.
+ * Media from tool calls is inserted inline after each tool_call block.
+ * Non-tool-call, non-generated media is appended at the end.
+ * @param {ChatMessage} message The chat message
+ * @returns {DisplayPart[]} Ordered list of display parts
+ */
+function buildDisplayList(message) {
+    /** @type {DisplayPart[]} */
+    const parts = [];
+    const extra = message.extra || {};
+
+    if (Array.isArray(extra.content_parts) && extra.content_parts.length > 0 && !extra.display_text) {
+        // Multi-step: build from content_parts
+        // Build a map of tool_call_id → media attachments for inline placement
+        /** @type {Map<string, MediaAttachment[]>} */
+        const toolMediaMap = new Map();
+        if (Array.isArray(extra.media)) {
+            for (const m of extra.media) {
+                if (m.source_id) {
+                    if (!toolMediaMap.has(m.source_id)) toolMediaMap.set(m.source_id, []);
+                    toolMediaMap.get(m.source_id).push(m);
+                }
+            }
+        }
+
+        for (const cp of extra.content_parts) {
+            switch (cp.type) {
+                case 'reasoning':
+                    parts.push({ type: 'reasoning', text: cp.text, duration: cp.duration });
+                    break;
+                case 'text':
+                    parts.push({ type: 'text', text: cp.text });
+                    break;
+                case 'tool_call':
+                    parts.push({ type: 'tool_call', tool_call: cp.tool_call });
+                    // Insert inline media for this tool call
+                    if (cp.tool_call?.id && toolMediaMap.has(cp.tool_call.id)) {
+                        parts.push({ type: 'media', attachments: toolMediaMap.get(cp.tool_call.id) });
+                    }
+                    break;
+            }
+        }
+    } else {
+        // Single-step: build from extra.reasoning + mes
+        if (extra.reasoning || extra.reasoning_duration) {
+            parts.push({
+                type: 'reasoning',
+                text: extra.reasoning || '',
+                duration: extra.reasoning_duration,
+                reasoningType: extra.reasoning_type,
+            });
+        }
+        parts.push({ type: 'text', text: extra.display_text || message.mes || '' });
+    }
+
+    // Append non-tool-call media at the end
+    if (Array.isArray(extra.media)) {
+        const endMedia = extra.media.filter(m => !m.source_id);
+        if (endMedia.length > 0) {
+            parts.push({ type: 'media', attachments: endMedia });
+        }
+    }
+
+    return parts;
+}
+
+/**
+ * Renders a reasoning display part as a collapsible details DOM element.
+ * @param {DisplayReasoningPart} part The reasoning display part
+ * @param {number} messageId The message index
+ * @param {ChatMessage} message The message object
+ * @returns {HTMLElement} The reasoning block element
+ */
+function renderReasoningBlock(part, messageId, message) {
+    const template = $('#message_reasoning_template .mes_reasoning_details').clone();
+    const details = /** @type {HTMLDetailsElement} */ (template[0]);
+
+    const durationMs = part.duration;
+    let headerText;
+    if (durationMs) {
+        const durationStr = moment.duration(durationMs).locale(getCurrentLocale()).humanize({ s: 50, ss: 3 });
+        headerText = t`Thought for ${durationStr}`;
+    } else {
+        headerText = t`Thought for some time`;
+    }
+
+    const reasoningText = trimSpaces(
+        message.extra?.reasoning_display_text && part === buildDisplayList(message).find(p => p.type === 'reasoning')
+            ? message.extra.reasoning_display_text
+            : part.text,
+    );
+    const displayReasoning = messageFormatting(reasoningText, '', false, false, messageId, {}, true);
+
+    template.find('.mes_reasoning_header_title').text(headerText);
+    template.find('.mes_reasoning').html(displayReasoning);
+
+    // Set state attributes
+    const state = part.text ? 'done' : (durationMs ? 'hidden' : 'none');
+    details.setAttribute('data-state', state);
+    if (part.reasoningType) {
+        details.setAttribute('data-type', part.reasoningType);
+    }
+    if (durationMs) {
+        const seconds = moment.duration(durationMs).asSeconds();
+        /** @type {HTMLElement} */
+        const headerTitle = details.querySelector('.mes_reasoning_header_title');
+        headerTitle.setAttribute('data-duration', String(seconds));
+        headerTitle.title = `${seconds} seconds`;
+    }
+
+    if (power_user.reasoning.auto_expand && state !== 'hidden') {
+        details.open = true;
+    }
+
+    return details;
+}
+
+/**
+ * Renders a text display part as a div with .mes_text class.
+ * @param {DisplayTextPart} part The text display part
+ * @param {number} messageId The message index
+ * @param {ChatMessage} message The message object
+ * @returns {HTMLElement} The text block element
+ */
+function renderTextBlock(part, messageId, message) {
+    const template = $('#message_text_template .mes_text').clone();
+
     /** @type {Partial<DOMPurify.Config>} */
     const sanitizerOverrides = message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {};
 
-    return messageFormatting(
-        message.extra?.display_text || message.mes,
+    const html = messageFormatting(
+        part.text,
         message.name,
         message.is_system,
         message.is_user,
@@ -2437,6 +2719,198 @@ function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
         sanitizerOverrides,
         false,
     );
+    template.html(html);
+    return template[0];
+}
+
+/**
+ * Renders a tool call display part as a card element.
+ * @param {DisplayToolCallPart} part The tool call display part
+ * @returns {HTMLElement} The tool call block element
+ */
+function renderToolCallBlock(part) {
+    const div = document.createElement('div');
+    div.className = 'mes_tool_call';
+    div.setAttribute('data-block-type', 'tool_call');
+    div.appendChild(renderToolCallCard(part.tool_call));
+    return div;
+}
+
+/**
+ * Renders a media display part as an inline media container.
+ * @param {DisplayMediaPart} part The media display part
+ * @param {ChatMessage} mes The message object
+ * @param {JQuery<HTMLElement>} messageElement The message jQuery element
+ * @returns {HTMLElement} The media block element
+ */
+function renderMediaBlock(part, mes, messageElement) {
+    const div = document.createElement('div');
+    div.className = 'mes_media_block';
+    div.setAttribute('data-block-type', 'media');
+
+    // Delegate to the media rendering in appendMediaToMessage for this subset
+    // We build a temporary wrapper and render into it
+    const $div = $(div);
+    const mediaDisplay = getMediaDisplay(mes);
+
+    // Check if these are tool-call media (have source_id)
+    const isToolCallMedia = part.attachments.some(a => a.source_id);
+
+    if (isToolCallMedia) {
+        // Tool-call media: render per-tool-call galleries
+        /** @type {Map<string, {items: MediaAttachment[], indices: number[]}>} */
+        const groups = new Map();
+        const allMedia = mes.extra?.media || [];
+        for (const attachment of part.attachments) {
+            const flatIndex = allMedia.indexOf(attachment);
+            const groupId = attachment.source_id;
+            if (!groups.has(groupId)) groups.set(groupId, { items: [], indices: [] });
+            const group = groups.get(groupId);
+            group.items.push(attachment);
+            group.indices.push(flatIndex >= 0 ? flatIndex : 0);
+        }
+
+        const tcIndices = mes.extra?.tool_call_swipe_indices || {};
+        for (const [toolCallId, group] of groups) {
+            const currentIdx = Math.min(tcIndices[toolCallId] || 0, group.items.length - 1);
+            const selectedMedia = group.items[currentIdx];
+            const flatIndex = group.indices[currentIdx];
+
+            const template = createMediaElement(selectedMedia, flatIndex);
+            const galleryControls = $('#message_gallery_controls .mes_img_swipes').clone();
+            galleryControls.attr('data-tool-call-id', toolCallId);
+            galleryControls.find('.mes_img_swipe_counter').text(`${currentIdx + 1}/${group.items.length}`);
+            template.addClass('img_swipes');
+            template.attr('data-tool-call-id', toolCallId);
+            template.append(galleryControls);
+            $div.append(template);
+        }
+    } else {
+        // Non-tool-call media: gallery or list mode
+        const allMedia = mes.extra?.media || [];
+        // Get indices of these attachments in the flat array
+        const indices = part.attachments.map(a => allMedia.indexOf(a)).map(i => i >= 0 ? i : 0);
+
+        if (mediaDisplay === MEDIA_DISPLAY.GALLERY) {
+            const mediaIndex = getMediaIndex(mes);
+            const clampedIndex = Math.min(mediaIndex, part.attachments.length - 1);
+            const selectedMedia = part.attachments[clampedIndex];
+            const flatIndex = indices[clampedIndex];
+
+            const galleryControls = $('#message_gallery_controls .mes_img_swipes').clone();
+            galleryControls.find('.mes_img_swipe_counter').text(`${clampedIndex + 1}/${part.attachments.length}`);
+            const template = createMediaElement(selectedMedia, flatIndex);
+            template.addClass('img_swipes');
+            template.append(galleryControls);
+            $div.append(template);
+        } else {
+            for (let i = 0; i < part.attachments.length; i++) {
+                const template = createMediaElement(part.attachments[i], indices[i]);
+                $div.append(template);
+            }
+        }
+    }
+
+    return div;
+}
+
+/**
+ * Creates a single media element (image/video/audio) from an attachment.
+ * @param {MediaAttachment} attachment The media attachment
+ * @param {number} index Index in the flat media array
+ * @returns {JQuery<HTMLElement>} The media container element
+ */
+function createMediaElement(attachment, index) {
+    if (!attachment.type) {
+        attachment.type = MEDIA_TYPE.IMAGE;
+    }
+    switch (attachment.type) {
+        case MEDIA_TYPE.VIDEO: {
+            const template = $('#message_video_template .mes_video_container').clone();
+            template.attr('data-index', index);
+            const video = template.find('.mes_video');
+            video.attr('src', attachment.url);
+            video.attr('title', attachment.title || '');
+            return template;
+        }
+        case MEDIA_TYPE.AUDIO: {
+            const template = $('#message_audio_template .mes_audio_container').clone();
+            template.attr('data-index', index);
+            const audio = template.find('.mes_audio');
+            audio.attr('src', attachment.url);
+            audio.attr('title', attachment.title || '');
+            new AudioPlayer(audio.get(0), template.get(0));
+            return template;
+        }
+        default: {
+            // Default to image
+            const template = $('#message_image_template .mes_img_container').clone();
+            template.attr('data-index', index);
+            const image = template.find('.mes_img');
+            image.attr('src', attachment.url);
+            image.attr('title', attachment.title || '');
+            return template;
+        }
+    }
+}
+
+/**
+ * Renders a display list into the .mes_content_blocks container.
+ * Clears the container and appends all blocks in order.
+ * @param {HTMLElement} container The .mes_content_blocks container
+ * @param {DisplayPart[]} displayList The ordered display parts
+ * @param {number} messageId The message index
+ * @param {ChatMessage} message The message object
+ * @param {JQuery<HTMLElement>} messageElement The message jQuery element
+ */
+function renderBlockList(container, displayList, messageId, message, messageElement) {
+    container.innerHTML = '';
+
+    for (const part of displayList) {
+        let block;
+        switch (part.type) {
+            case 'reasoning':
+                block = renderReasoningBlock(part, messageId, message);
+                break;
+            case 'text':
+                block = renderTextBlock(part, messageId, message);
+                break;
+            case 'tool_call':
+                block = renderToolCallBlock(part);
+                break;
+            case 'media':
+                block = renderMediaBlock(part, message, messageElement);
+                break;
+            default:
+                continue;
+        }
+        container.appendChild(block);
+    }
+
+    // Toggle inline_media class on text blocks when inline_image is false
+    const hasMedia = displayList.some(p => p.type === 'media');
+    const hideMessageText = hasMedia && message?.extra?.inline_image === false;
+    if (hideMessageText) {
+        container.querySelectorAll('.mes_text').forEach(el => el.classList.add('inline_media'));
+    }
+
+    // Toggle CSS class for reasoning presence
+    const hasReasoning = displayList.some(p => p.type === 'reasoning' && p.text);
+    const hasHiddenReasoning = displayList.some(p => p.type === 'reasoning' && !p.text && p.duration);
+    /** @type {HTMLElement} */
+    const mesElement = container.closest('.mes');
+    if (mesElement) {
+        mesElement.classList.toggle('reasoning', hasReasoning || hasHiddenReasoning);
+        if (hasReasoning) {
+            setDatasetProperty(mesElement, 'reasoningState', 'done');
+        } else if (hasHiddenReasoning) {
+            setDatasetProperty(mesElement, 'reasoningState', 'hidden');
+        } else {
+            setDatasetProperty(mesElement, 'reasoningState', null);
+        }
+    }
+
+    addCopyToCodeBlocks($(container));
 }
 
 /**
@@ -2542,7 +3016,6 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     }
     const momentDate = timestampToMoment(mes.send_date);
     const timestamp = momentDate.isValid() ? momentDate.format('LL LT') : '';
-    const messageHTML = getMessageTextHTML(mes, { messageId });
     const bookmarkLink = mes?.extra?.bookmark_link;
     const tokenCount = mes.extra?.token_count;
     const { timerValue, timerTitle } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
@@ -2574,8 +3047,6 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
         messageElement.find('.mes_bias').html(bias);
     }
 
-    updateReasoningUI(messageElement);
-
     if (power_user.timestamp_model_icon && mes.extra?.api) {
         insertSVGIcon(messageElement, mes.extra);
     }
@@ -2595,9 +3066,13 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
         $(this).parent().html('<div class="missing-avatar fa-solid fa-user-slash"></div>');
     });
 
-    appendMediaToMessage(mes, messageElement, adjustMediaScroll);
-    messageElement.find('.mes_text').html(messageHTML);
-    addCopyToCodeBlocks(messageElement);
+    // Collect media from tool_call content_parts into mes.extra.media for unified rendering
+    collectToolCallMedia(mes);
+
+    // Build display list and render all content blocks
+    const displayList = buildDisplayList(mes);
+    const contentBlocks = messageElement.find('.mes_content_blocks')[0];
+    renderBlockList(contentBlocks, displayList, messageId, mes, messageElement);
 
     // Set the swipes counter for all non-user messages.
     if (!mes.is_user) {
@@ -3485,9 +3960,19 @@ class StreamingProcessor {
     async #checkDomElements(messageId, continueOnReasoning = null) {
         if (this.messageDom === null || this.messageTextDom === null) {
             this.messageDom = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
-            this.messageTextDom = this.messageDom?.querySelector('.mes_text');
             this.messageTimerDom = this.messageDom?.querySelector('.mes_timer');
             this.messageTokenCounterDom = this.messageDom?.querySelector('.tokenCounterDisplay');
+
+            // Find or create the text block inside .mes_content_blocks for streaming
+            const contentBlocks = this.messageDom?.querySelector('.mes_content_blocks');
+            this.messageTextDom = contentBlocks?.querySelector('.mes_text[data-block-type="text"]');
+            if (!this.messageTextDom && contentBlocks) {
+                const textBlock = document.createElement('div');
+                textBlock.className = 'mes_text';
+                textBlock.dataset.blockType = 'text';
+                contentBlocks.appendChild(textBlock);
+                this.messageTextDom = textBlock;
+            }
         }
         if (continueOnReasoning) {
             await this.reasoningHandler.process(messageId, false, this.promptReasoning);
@@ -3496,10 +3981,10 @@ class StreamingProcessor {
     }
 
     #updateMessageBlockVisibility() {
-        if (this.messageDom instanceof HTMLElement && Array.isArray(this.toolCalls) && this.toolCalls.length > 0) {
-            const shouldHide = ['', '...'].includes(this.result) && !this.reasoningHandler.reasoning;
-            this.messageDom.classList.toggle('displayNone', shouldHide);
-        }
+        // No-op: tool calls are content and should always remain visible.
+        // The old logic hid the message bubble when tool calls were detected but text was empty,
+        // which caused a flicker during regeneration. In the content_parts model, messages with
+        // tool calls are kept and merged — hiding them is unnecessary and counterproductive.
     }
 
     markUIGenStarted() {
@@ -3635,11 +4120,44 @@ class StreamingProcessor {
         }
     }
 
+    /**
+     * Finalizes an intermediary message before tool invocation.
+     * This performs a subset of onFinishStreaming: emits events, styles code blocks,
+     * processes reasoning, and syncs swipe data — but does NOT unlock UI, auto-swipe,
+     * play sounds, or save the chat (those happen after the full tool chain completes).
+     * @param {number} messageId Current message ID
+     * @param {string} text Final message text
+     */
+    async finalizeIntermediaryMessage(messageId, text) {
+        await this.onProgressStreaming(messageId, text, true);
+        await this.reasoningHandler.finish(messageId);
+        syncMesToSwipe(messageId);
+        saveLogprobsForActiveMessage(this.messageLogprobs.filter(Boolean), this.continueMessage);
+
+        if (Array.isArray(this.images) && this.images.length > 0) {
+            const message = chat[messageId];
+            await processImageAttachment(message, { imageUrls: this.images });
+        }
+
+        // Re-render the full block list now that streaming is done
+        updateMessageBlock(messageId, chat[messageId]);
+
+        // Store reasoning signature
+        if (this.reasoningSignature) {
+            const message = chat[messageId];
+            message.extra = message.extra || {};
+            message.extra.reasoning_signature = this.reasoningSignature;
+        }
+
+        if (this.type !== 'impersonate') {
+            await eventSource.emit(event_types.MESSAGE_RECEIVED, messageId, this.type);
+            await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, messageId, this.type);
+        }
+    }
+
     async onFinishStreaming(messageId, text) {
         await this.onProgressStreaming(messageId, text, true);
-        const messageElement = chatElement.find(`.mes[mesid="${messageId}"]`);
         const message = chat[messageId];
-        addCopyToCodeBlocks(messageElement);
 
         await this.reasoningHandler.finish(messageId);
 
@@ -3665,7 +4183,6 @@ class StreamingProcessor {
 
         if (Array.isArray(this.images) && this.images.length > 0) {
             await processImageAttachment(message, { imageUrls: this.images });
-            appendMediaToMessage(message, $(this.messageDom));
         }
 
         // Store reasoning signature for models that support multi-turn context
@@ -3673,6 +4190,9 @@ class StreamingProcessor {
             message.extra = message.extra || {};
             message.extra.reasoning_signature = this.reasoningSignature;
         }
+
+        // Re-render the full block list now that streaming is done
+        updateMessageBlock(messageId, message);
 
         this.markUIGenStopped();
 
@@ -3683,6 +4203,7 @@ class StreamingProcessor {
             await eventSource.emit(event_types.IMPERSONATE_READY, text);
         }
 
+        const messageElement = chatElement.find(`.mes[mesid="${messageId}"]`);
         updateSwipeCounter(messageId, { message, messageElement });
 
         const isAborted = this.abortController.signal.aborted;
@@ -4164,6 +4685,25 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
+
+    /**
+     * Attaches tool invocations to the parent message, recurses into Generate,
+     * then merges the resulting messages back into a single content_parts message.
+     * Shared by both streaming and non-streaming tool-call paths.
+     * @param {number} parentMsgId Chat index of the assistant message that initiated tool calls
+     * @param {import('./scripts/tool-calling.js').ToolInvocation[]} invocations Tool invocations to attach
+     * @returns {Promise<any>} Result from the recursive Generate call
+     */
+    async function continueToolCallChain(parentMsgId, invocations) {
+        await ToolManager.attachToolInvocations(parentMsgId, invocations);
+        const mergeStartIndex = chat.length;
+        const result = await Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth }, dryRun);
+        ToolManager.mergeToolChainMessages(parentMsgId, mergeStartIndex);
+        syncMesToSwipe(parentMsgId);
+        scrollChatToBottom({ waitForFrame: true });
+        await saveChatConditional();
+        return result;
+    }
 
     // Prevent generation from shallow characters
     await unshallowCharacter(this_chid);
@@ -5275,14 +5815,19 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             const isStreamFinished = streamingProcessor && !streamingProcessor.isStopped && streamingProcessor.isFinished;
             const isStreamWithToolCalls = streamingProcessor && Array.isArray(streamingProcessor.toolCalls) && streamingProcessor.toolCalls.length;
             if (canPerformToolCalls && isStreamFinished && isStreamWithToolCalls) {
-                const lastMessage = chat[chat.length - 1];
                 const hasToolCalls = ToolManager.hasToolCalls(streamingProcessor.toolCalls);
-                const shouldDeleteMessage = type !== 'swipe' && ['', '...'].includes(lastMessage?.mes) && !lastMessage?.extra?.reasoning && ['', '...'].includes(streamingProcessor?.result);
-                hasToolCalls && shouldDeleteMessage && await deleteLastMessage();
+                const parentMsgId = streamingProcessor.messageId;
+
+                // Finalize the streamed text message so extensions (TTS, etc.) are notified
+                await streamingProcessor.finalizeIntermediaryMessage(parentMsgId, getMessage);
+
                 const invocationResult = await ToolManager.invokeFunctionTools(streamingProcessor.toolCalls, {
                     reasoningText: streamingProcessor.reasoningHandler.reasoning,
                 });
-                const shouldStopGeneration = (!invocationResult.invocations.length && shouldDeleteMessage) || invocationResult.stealthCalls.length;
+                const hasNoText = ['', '...'].includes(chat[parentMsgId]?.mes)
+                    && !chat[parentMsgId]?.extra?.reasoning
+                    && !chat[parentMsgId]?.extra?.content_parts?.length;
+                const shouldStopGeneration = (!invocationResult.invocations.length && hasNoText) || invocationResult.stealthCalls.length;
                 if (hasToolCalls) {
                     if (shouldStopGeneration) {
                         if (Array.isArray(invocationResult.errors) && invocationResult.errors.length) {
@@ -5295,8 +5840,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
                     streamingProcessor = null;
                     depth = depth + 1;
-                    await ToolManager.saveFunctionToolInvocations(invocationResult.invocations);
-                    return Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth }, dryRun);
+                    return continueToolCallChain(parentMsgId, invocationResult.invocations);
                 }
             }
 
@@ -5404,10 +5948,9 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         if (canPerformToolCalls) {
             const hasToolCalls = ToolManager.hasToolCalls(data);
-            const shouldDeleteMessage = type !== 'swipe' && ['', '...'].includes(getMessage) && !reasoning;
-            hasToolCalls && shouldDeleteMessage && await deleteLastMessage();
+            const hasNoText = type !== 'swipe' && ['', '...'].includes(getMessage) && !reasoning;
             const invocationResult = await ToolManager.invokeFunctionTools(data, { reasoningText: reasoning });
-            const shouldStopGeneration = (!invocationResult.invocations.length && shouldDeleteMessage) || invocationResult.stealthCalls.length;
+            const shouldStopGeneration = (!invocationResult.invocations.length && hasNoText) || invocationResult.stealthCalls.length;
             if (hasToolCalls) {
                 if (shouldStopGeneration) {
                     if (Array.isArray(invocationResult.errors) && invocationResult.errors.length) {
@@ -5418,8 +5961,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 }
 
                 depth = depth + 1;
-                await ToolManager.saveFunctionToolInvocations(invocationResult.invocations);
-                return Generate('normal', { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, depth }, dryRun);
+                return continueToolCallChain(chat.length - 1, invocationResult.invocations);
             }
         }
 
@@ -6536,6 +7078,11 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
             lastMessage.extra.reasoning = reasoning;
             lastMessage.extra.reasoning_duration = null;
             lastMessage.extra.reasoning_signature = reasoningSignature;
+            // Clear stale tool-call state from previous swipe so the new swipe renders cleanly
+            delete lastMessage.extra.content_parts;
+            delete lastMessage.extra.tool_invocations;
+            delete lastMessage.extra.tool_call_swipe_indices;
+            delete lastMessage.extra.media;
             await processImageAttachment(lastMessage, { imageUrls });
             if (power_user.message_token_count_enabled) {
                 const tokenCountText = (reasoning || '') + lastMessage.mes;
@@ -8014,6 +8561,10 @@ function updateMessage(div) {
         text = removeMacros(text);
     }
     mes.mes = text;
+    // Clear structured content_parts when user manually edits the message text
+    if (mes.extra?.content_parts) {
+        delete mes.extra.content_parts;
+    }
     if (mes.swipe_id !== undefined) {
         ensureSwipes(mes);
         mes.swipes[mes.swipe_id] = text;
@@ -8094,9 +8645,13 @@ export async function messageEdit(editMessageId) {
 
     const chatScrollPosition = chatElement.scrollTop();
     const messageBlock = messageElement.find('.mes_block');
-    const messageText = messageBlock.find('.mes_text');
+    const contentBlocks = messageBlock.find('.mes_content_blocks');
 
-    messageText.empty();
+    // Clear all content blocks and create a single text block for the edit textarea
+    contentBlocks.empty();
+    const editTextBlock = $('<div class="mes_text" data-block-type="text"></div>');
+    contentBlocks.append(editTextBlock);
+
     messageBlock.find('.mes_buttons').css('display', 'none');
     messageBlock.find('.mes_edit_buttons').css('display', 'inline-flex');
 
@@ -8110,7 +8665,7 @@ export async function messageEdit(editMessageId) {
     editTextArea.id = 'curEditTextarea';
     editTextArea.className = 'edit_textarea mdHotkeys';
     editTextArea.dataset.macros = '';
-    messageText.append(editTextArea);
+    editTextBlock.append(editTextArea);
 
     const text = trimSpaces(editMessage.mes || '');
     const $editTextArea = $(editTextArea);
@@ -8140,7 +8695,6 @@ export async function messageEdit(editMessageId) {
  * @param {number} [messageId=this_edit_mes_id]
  */
 async function messageEditCancel(messageId = this_edit_mes_id) {
-    let text = chat[messageId].mes;
     let thisMesDiv;
     // If this is the button then select it's parent. Otherwise, select by messageId.
     if (this?.classList?.contains('mes_edit_cancel')) {
@@ -8150,21 +8704,9 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
     }
 
     const thisMesBlock = thisMesDiv.find('.mes_block');
-    thisMesBlock.find('.mes_text').empty();
     thisMesDiv.find('.mes_edit_buttons').css('display', 'none');
     thisMesBlock.find('.mes_buttons').css('display', '');
-    thisMesBlock.find('.mes_text')
-        .append(messageFormatting(
-            text,
-            this_edit_mes_chname,
-            chat[messageId].is_system,
-            chat[messageId].is_user,
-            messageId,
-            {},
-            false,
-        ));
-    appendMediaToMessage(chat[messageId], thisMesDiv);
-    addCopyToCodeBlocks(thisMesDiv);
+    updateMessageBlock(messageId, chat[messageId]);
 
     const reasoningEditDone = thisMesBlock.find('.mes_reasoning_edit_cancel:visible');
     if (reasoningEditDone.length > 0) {
@@ -8237,28 +8779,14 @@ async function messageEditDone(div) {
         return;
     }
 
-    let { mesBlock, text, mes, bias } = updateMessage(div);
+    let { mesBlock, mes, bias } = updateMessage(div);
 
     await eventSource.emit(event_types.MESSAGE_EDITED, this_edit_mes_id);
-    text = chat[this_edit_mes_id]?.mes ?? text;
-    mesBlock.find('.mes_text').empty();
     mesBlock.find('.mes_edit_buttons').css('display', 'none');
     mesBlock.find('.mes_buttons').css('display', '');
-    mesBlock.find('.mes_text').append(
-        messageFormatting(
-            text,
-            this_edit_mes_chname,
-            mes.is_system,
-            mes.is_user,
-            this_edit_mes_id,
-            {},
-            false,
-        ),
-    );
+    updateMessageBlock(this_edit_mes_id, mes);
     mesBlock.find('.mes_bias').empty();
     mesBlock.find('.mes_bias').append(messageFormatting(bias, '', false, false, -1, {}, false));
-    appendMediaToMessage(mes, div.closest('.mes'));
-    addCopyToCodeBlocks(div.closest('.mes'));
 
     const reasoningEditDone = mesBlock.find('.mes_reasoning_edit_done:visible');
     if (reasoningEditDone.length > 0) {
@@ -9924,6 +10452,9 @@ export async function swipe(event, direction, { source, repeated, message = chat
             delete message.extra.negative;
             delete message.extra.title;
             delete message.extra.append_title;
+            delete message.extra.content_parts;
+            delete message.extra.tool_invocations;
+            delete message.extra.tool_call_swipe_indices;
         }
         delete message.gen_started;
         delete message.gen_finished;
@@ -10074,11 +10605,10 @@ export async function swipe(event, direction, { source, repeated, message = chat
         if (run_generate) {
             await updateSwipeCounter(mesId);
             //shows "..." while generating
-            thisMesDiv.find('.mes_text').html('...');
+            thisMesDiv.find('.mes_content_blocks').html('<div class="mes_text" data-block-type="text">...</div>');
             // resets the timer
             thisMesDiv.find('.mes_timer').html('');
             thisMesDiv.find('.tokenCounterDisplay').text('');
-            updateReasoningUI(thisMesDiv, { reset: true });
         } else {
             //console.log('showing previously generated swipe candidate, or "..."');
             //console.log('onclick right swipe calling addOneMessage');
@@ -10104,8 +10634,9 @@ export async function swipe(event, direction, { source, repeated, message = chat
         thisMesDiv.css('height', thisMesDivHeight);
         expandNewMessage(thisMesDiv);
 
-        if (run_generate) {
-            appendMediaToMessage(chat[mesId], thisMesDiv);
+        if (run_generate && Array.isArray(chat[mesId]?.extra?.media) && chat[mesId].extra.media.length > 0) {
+            // Re-render block list to show existing media from this swipe's data
+            updateMessageBlock(mesId, chat[mesId]);
         }
 
         await eventSource.emit(event_types.MESSAGE_SWIPED, (mesId));

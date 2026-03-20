@@ -21,6 +21,24 @@ declare global {
     type MessageTimestamp = string | number | Date;
     type Character = import('./scripts/char-data').v1CharData;
     type ChatMessageExtra = BaseMessageExtra & Partial<ReasoningMessageExtra> & Record<string, any>;
+
+    type ContentPart = TextContentPart | ToolCallContentPart | ReasoningContentPart;
+
+    interface TextContentPart {
+        type: 'text';
+        text: string;
+    }
+
+    interface ToolCallContentPart {
+        type: 'tool_call';
+        tool_call: ToolInvocation;
+    }
+
+    interface ReasoningContentPart {
+        type: 'reasoning';
+        text: string;
+        duration?: number;
+    }
     type Theme = ReturnType<typeof getThemeObject>;
 
     interface Group {
@@ -98,6 +116,7 @@ declare global {
         display_text?: string;
         reasoning_display_text?: string;
         tool_invocations?: ToolInvocation[];
+        content_parts?: ContentPart[];
         title?: string;
         isSmallSys?: boolean;
         token_count?: number;
@@ -109,6 +128,8 @@ declare global {
         media_display?: string;
         media_index?: number;
         media?: MediaAttachment[],
+        /** Per-tool-call swipe indices, keyed by tool call ID */
+        tool_call_swipe_indices?: Record<string, number>;
         /** @deprecated Use `files` instead */
         file?: FileAttachment;
         /** @deprecated Use `media` instead */
@@ -134,6 +155,8 @@ declare global {
         title?: string;
         type: string;
         source?: string;
+        /** ID of the source that produced this media (e.g. tool call ID), used to group media into independent galleries */
+        source_id?: string;
     }
 
     interface ImageGenerationAttachmentProps {

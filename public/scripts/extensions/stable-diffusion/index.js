@@ -5190,6 +5190,14 @@ async function sdMessageButton($icon, { animate } = {}) {
 
     // If already contains an image and it's not inline - leave it as is
     message.extra.inline_image = !(message.extra.media.length && !message.extra.inline_image);
+    // Inherit tool call ID from source media so regenerated images stay in the same gallery group
+    if (selectedMedia.source_id) {
+        newMediaAttachment.source_id = selectedMedia.source_id;
+        // Update per-tool-call gallery index to point to the new image
+        message.extra.tool_call_swipe_indices = message.extra.tool_call_swipe_indices || {};
+        const groupItems = message.extra.media.filter(m => m.source_id === selectedMedia.source_id);
+        message.extra.tool_call_swipe_indices[selectedMedia.source_id] = groupItems.length; // will be the index after push
+    }
     message.extra.media.push(newMediaAttachment);
     message.extra.media_index = message.extra.media.length - 1;
 
@@ -5297,8 +5305,9 @@ async function generateMediaSwipe(mediaAttachment, message, onStart, onComplete,
  * @param {ChatMessage} param.message Message object
  * @param {JQuery<HTMLElement>} param.element Message element
  * @param {string} param.direction Swipe direction
+ * @param {string} [param.toolCallId] Tool call ID for per-tool-call galleries
  */
-async function onImageSwiped({ message, element, direction }) {
+async function onImageSwiped({ message, element, direction, toolCallId }) {
     const { powerUserSettings, accountStorage } = getContext();
 
     if (!isValidState()) {
@@ -5314,7 +5323,18 @@ async function onImageSwiped({ message, element, direction }) {
         return;
     }
 
-    const shouldGenerate = message?.extra?.media_index === media.length - 1;
+    let shouldGenerate = false;
+
+    if (toolCallId) {
+        // Per-tool-call gallery: check if at the end of this tool call's media group
+        const groupItems = media.filter(m => m.source_id === toolCallId);
+        const tcIndices = message.extra?.tool_call_swipe_indices || {};
+        const currentIdx = tcIndices[toolCallId] || 0;
+        shouldGenerate = currentIdx === groupItems.length - 1;
+    } else {
+        shouldGenerate = message?.extra?.media_index === media.length - 1;
+    }
+
     if (!shouldGenerate) {
         return;
     }
@@ -5436,8 +5456,27 @@ function registerFunctionTool() {
             if (!isValidState()) throw new Error('Image generation is not configured.');
             if (!args) throw new Error('Missing arguments');
             if (!args.prompt) throw new Error('Missing prompt');
-            const url = await generatePicture(initiators.tool, {}, args.prompt);
-            return encodeURI(url);
+
+            // Capture media via callback to embed in tool card instead of pushing a separate chat message
+            /** @type {MediaAttachment | null} */
+            let capturedMedia = null;
+            const captureCallback = (prompt, imageData, genType, negPrefix, _initiator, _prefixedPrompt, format) => {
+                capturedMedia = {
+                    url: imageData,
+                    type: isVideo(format) ? MEDIA_TYPE.VIDEO : MEDIA_TYPE.IMAGE,
+                    title: prompt,
+                    generation_type: genType,
+                    negative: negPrefix,
+                    source: MEDIA_SOURCE.GENERATED,
+                };
+            };
+
+            const url = await generatePicture(initiators.tool, {}, args.prompt, undefined, captureCallback);
+
+            return {
+                result: encodeURI(url),
+                media: capturedMedia ? [capturedMedia] : undefined,
+            };
         },
     });
 }

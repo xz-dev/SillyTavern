@@ -83,6 +83,7 @@ export const event_types = {
     CONNECTION_PROFILE_UPDATED: 'connection_profile_updated',
     TOOL_CALLS_PERFORMED: 'tool_calls_performed',
     TOOL_CALLS_RENDERED: 'tool_calls_rendered',
+    CHARACTER_MESSAGE_RENDERED_BUT_CONTINUE: 'character_message_rendered_but_continue',
     CHARACTER_MANAGEMENT_DROPDOWN: 'charManagementDropdown',
     SECRET_WRITTEN: 'secret_written',
     SECRET_DELETED: 'secret_deleted',
